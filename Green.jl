@@ -1,74 +1,127 @@
-using StatsBase
-using Statistics
 using LinearAlgebra
 using PyPlot
 
-#
-# Quantum Transmission
-#
-function QTran()
-    # Physical Constants
+
+mutable struct Quantum
+    ħ   :: Float64          # Reduced Planck constant [J.s]
+    q   :: Float64          # Fundamental electron charge [C]
+    mo  :: Float64          # Electron rest mass [kg]
+    iη  :: ComplexF64
+    t   :: Float64          # Hopping energy
+    N   :: Int              # Number of lattice points
+    W   :: Float64          # Width of device [m]
+    U   :: Vector{Float64}  # Potential [eV]
+    H   :: Matrix{Float64}  # Hamiltonian matrix
+    ao  :: Float64          # Lattice constant [m]
+end
+
+function Quantum(W,U)
     ħ = 1.054571817E-34                         # J.s
     q = 1.602176634E-19                         # C
     mo = 9.1093837015E-31                       # kg
-    iη = 1E-36*im                                # Differential
+    iη = 1E-36*im                               
+    
+    N = length(U)
+    ao = W/N
+    t  = 0.5*((ħ/ao^2)*(ħ/mo))/q
 
-    # Parameters
-    N = 200                                     # Number of points
-    w = 10E-9                                   # Physical width of system
-    mr = 1                                      # Effective mass
-
-    Σ1 = zeros(ComplexF64,N,N)                  # Self-energies
-    Σ2 = zeros(ComplexF64,N,N)
-    Γ1 = zeros(ComplexF64,N,N)                  # Gamma matrices
-    Γ2 = zeros(ComplexF64,N,N)
-
-    # Derived parameters
-    ao = w/N                                    # Lattice constant
-    t  = 0.5*((ħ/ao^2)*(ħ/(mr*mo)))/q           # Hopping energy [eV]
-
+    H = SymTridiagonal(2*t*ones(N) + U, -t*ones(N-1))
+    
     println("Hopping energy = ",t," eV")
     println("Lattice constant = ",ao/1E-10," A")
+        
+    return Quantum(ħ,q,mo,iη,t,N,W,U,H,ao)
+end
+
+function getPotential(N :: Integer, a :: Integer)
+    xi = (N-a)÷2 
+    xa = (N+a)÷2
     
-    # Potential
-    xi = 30
-    xa = 79
     U = zeros(N)
     U[xi:xa] .= 1.0
-    Δ = (xa-xi+1)*ao
-    
-    println("Barrier = ",Δ/1E-9," nm")
 
-    # Hamiltonian
-    H = SymTridiagonal(2*t*ones(N) + U, -t*ones(N-1))
-    EnergySpace = LinRange(0,5,200)
-        
+    return U
+end    
+
+function Σ(Q :: Quantum, n :: Int, ε :: Float64)
+    Σf = zeros(ComplexF64,Q.N,Q.N)
+       
+    x = ε/(2Q.t)
+    ka = acos(1.0 - x)
+    
+    Σf[n,n] = -Q.t*exp(im*ka)
+    
+    return Σf
+end
+
+function Γ(Σ :: Matrix{ComplexF64})
+    return im*(Σ - Σ')
+end
+
+function Green(Q :: Quantum, ε :: Float64, Σ1 :: Matrix{ComplexF64}, Σ2 :: Matrix{ComplexF64})
+    return inv(ε*I - Q.H - Σ1 - Σ2)
+end
+
+function transmission(Q :: Quantum, Γ1 :: Matrix{ComplexF64}, Γ2 :: Matrix{ComplexF64}, G :: Matrix{ComplexF64})
+    T = Γ1*G*Γ2*G'
+    x = tr(real(T))
+
+    return x
+end
+
+function SpectralFunction(G)
+    return im*(G-G')
+end
+
+# Quantum Transmission
+function QTran(Q :: Quantum, EnergySpace :: LinRange{Float64,Int})
     # Main loop
-    transmission = []
-    for Energy in EnergySpace
-        x = Energy/(2t)
-        ka = acos(1.0 - x)
-        
+    tran = []
+    for ε in EnergySpace
         # Self-energies
-        Σ1[1,1] = -t*exp(im*ka)
-        Σ2[N,N] = -t*exp(im*ka)
+        Σ1 = Σ(Q,1,ε)
+        Σ2 = Σ(Q,Q.N,ε)
 
         # Gamma functions
-        Γ1 = im*(Σ1 - Σ1')
-        Γ2 = im*(Σ2 - Σ2')
+        Γ1 = Γ(Σ1)
+        Γ2 = Γ(Σ2)
 
         # Green's function
-        G = inv(Energy*I - H - Σ1 - Σ2)
+        G = Green(Q,ε,Σ1,Σ2)
 
         # Transmission
-        T = Γ1*G*Γ2*G'
-        x = tr(real(T))
-        
-        push!(transmission,x)
+        push!(tran,transmission(Q,Γ1,Γ2,G))
     end
     
-    return EnergySpace,transmission,Δ
+    return tran
 end 
+
+function LDOS(Q :: Quantum, ε :: Float64)
+    Σ1 = Σ(Q,1,ε)
+    Σ2 = Σ(Q,Q.N,ε)
+        
+    # Green's function
+    G = Green(Q,ε,Σ1,Σ2)
+    A = SpectralFunction(G)
+    return real(diag(Diagonal(A)))
+end
+
+function DOS(Q :: Quantum, EnergySpace :: LinRange{Float64,Int})
+    D = []
+    for ε in EnergySpace
+        Σ1 = Σ(Q,1,ε)
+        Σ2 = Σ(Q,Q.N,ε)
+    
+        # Green's function
+        G = Green(Q,ε,Σ1,Σ2)
+        A = SpectralFunction(G)
+        d = tr(real(A))
+        
+        push!(D,d)
+    end
+    
+    return D
+end    
 
 function theory(ε,a)
     ħ = 1.054571817E-34     # [J.s]
@@ -92,18 +145,35 @@ end
 #==============================================================#
 #                             MAIN                             #
 #==============================================================#
-x,y,a = QTran()
-z = theory(x,a)
+U = getPotential(200,40)
+qSys = Quantum(10E-9,U)
 
-# Plotting
-plot(x,y)
-plot(x,z)
-xlabel("Energy [eV]")
-ylabel("Transmission")
-legend(["Green","Exact"])
-show()
+if (true)
+    EnergySpace = LinRange(0.0,5.0,200)
+    t = QTran(qSys,EnergySpace)
 
+    # Plotting
+    plot(EnergySpace,t)
+    xlabel("Energy [eV]")
+    ylabel("Transmission")
+    show()
+end
 
+if (false)
+    y = LDOS(qSys,2.5)
+    plot(y)
+    xlabel("Position")
+    ylabel("LDOS")
+    show()
+end
 
-
-
+if (false)
+    EnergySpace = LinRange(0.0,5.0,200)
+    D = DOS(qSys,EnergySpace)
+    
+    # Plotting
+    plot(EnergySpace,D)
+    xlabel("Energy [eV]")
+    ylabel("DOS")
+    show()
+end
